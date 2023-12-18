@@ -28,11 +28,11 @@ limitations under the License.
 #include <photon/common/timeout.h>
 #include <photon/common/utility.h>
 #include <photon/net/security-context/tls-stream.h>
+#include "../io/reset_handle.h"
 
 namespace photon {
 namespace net {
 static constexpr int poll_size = 16;
-static constexpr int EOK = ENXIO;
 
 class cURLLoop;
 struct CurlThCtx {
@@ -110,7 +110,7 @@ static uint64_t on_timer(void* = nullptr) {
 }
 /* CURLMOPT_TIMERFUNCTION */
 static int timer_cb(CURLM*, long timeout_ms, void*) {
-    if (timeout_ms >= 0) {
+    if (timeout_ms >= 0 && cctx.g_timer) {
         cctx.g_timer->reset(timeout_ms * 1000UL);
     }
     return 0;
@@ -160,6 +160,8 @@ public:
 
     void stop() { loop->stop(); }
 
+    photon::thread* loop_thread() { return loop->loop_thread(); }
+
 protected:
     EventLoop* loop;
     int cnt;
@@ -167,19 +169,15 @@ protected:
 
     int wait_fds(EventLoop*) {
         cnt = cctx.g_poller->wait_for_events((void**)&cbs, poll_size);
-        if (cnt > 0) return 1;
-        if (cnt < 0 && errno == ETIMEDOUT) {
-            return 0;
-        }
-        if (cnt < 0 || errno == EINTR) return -1;
-        return 0;
+        return cnt;
     }
 
     int on_poll(EventLoop*) {
         for (int i = 0; i < cnt; i++) {
             int fd = cbs[i] >> 2;
             int ev = cbs[i] & 0b11;
-            if (fd != CURL_SOCKET_BAD && ev != 0) do_action(fd, ev);
+            if (fd != CURL_SOCKET_BAD && ev != 0)
+                photon::thread_create11(&do_action, fd, ev);
         }
         return 0;
     }
@@ -189,11 +187,14 @@ protected:
 int libcurl_set_pipelining(long val) {
     return curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_PIPELINING, val);
 }
-// this feature seems not able to use in 7.29.0
+
 int libcurl_set_maxconnects(long val) {
-    return curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_MAX_TOTAL_CONNECTIONS,
-                             val);
-    // return 0;
+#if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 30
+    return curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_MAX_TOTAL_CONNECTIONS, val);
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
 }
 
 __attribute__((constructor)) void global_init() {
@@ -212,10 +213,21 @@ void __OpenSSLGlobalInit();
 //     curl_global_cleanup();
 // }
 
+class CurlResetHandle : public ResetHandle {
+     int reset() override {
+        LOG_INFO("reset libcurl by reset handle");
+        // interrupt g_loop by ETIMEDOUT to replace g_poller
+        if (cctx.g_loop)
+            thread_interrupt(cctx.g_loop->loop_thread(), ETIMEDOUT);
+        return 0;
+     }
+};
+static thread_local CurlResetHandle *reset_handler = nullptr;
+
 int libcurl_init(long flags, long pipelining, long maxconn) {
     if (cctx.g_loop == nullptr) {
         __OpenSSLGlobalInit();
-        cctx.g_poller = photon::new_epoll_cascading_engine();
+        cctx.g_poller = photon::new_default_cascading_engine();
         cctx.g_loop = new cURLLoop();
         cctx.g_loop->start();
         cctx.g_timer =
@@ -236,30 +248,44 @@ int libcurl_init(long flags, long pipelining, long maxconn) {
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_SOCKETFUNCTION, sock_cb);
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_TIMERFUNCTION, timer_cb);
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_MAXCONNECTS, 0);
+#if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 30
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_MAX_TOTAL_CONNECTIONS, 0);
+#endif
 
         libcurl_set_pipelining(pipelining);
         libcurl_set_maxconnects(maxconn);
+        if (reset_handler == nullptr) {
+            reset_handler = new CurlResetHandle();
+        }
+        LOG_INFO("libcurl initialized");
     }
 
     return 0;
 }
 void libcurl_fini() {
+    delete cctx.g_timer;
+    cctx.g_timer = nullptr;
     cctx.g_loop->stop();
     delete cctx.g_loop;
     cctx.g_loop = nullptr;
-    delete cctx.g_timer;
-    cctx.g_timer = nullptr;
     delete cctx.g_poller;
     cctx.g_poller = nullptr;
     CURLMcode ret = curl_multi_cleanup(cctx.g_libcurl_multi);
     if (ret != CURLM_OK)
         LOG_ERROR("libcurl-multi cleanup error: ", curl_multi_strerror(ret));
     cctx.g_libcurl_multi = nullptr;
+    safe_delete(reset_handler);
+    LOG_INFO("libcurl finished");
 }
 
 std::string url_escape(const char* str) {
     auto s = curl_escape(str, 0);
+    DEFER(curl_free(s));
+    return std::string(s);
+}
+
+std::string url_unescape(const char* str) {
+    auto s = curl_unescape(str, 0);
     DEFER(curl_free(s));
     return std::string(s);
 }

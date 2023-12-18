@@ -43,12 +43,13 @@ int curl_perform(CURL* curl, uint64_t timeout);
 void libcurl_fini();
 
 std::string url_escape(const char*);
+std::string url_unescape(const char*);
 
 inline void convert(const std::string& v, uint64_t& value) {
     value = std::atoll(v.c_str());
 }
 
-inline void convert(const std::string& v, int64_t& value) {
+inline void convert(const std::string& v, ssize_t& value) {
     value = std::atoll(v.c_str());
 }
 
@@ -144,9 +145,11 @@ public:
 struct IOVWriter : public IOVector {
     using IOVector::IOVector;
     size_t drop = 0;
+    size_t written = 0;
     size_t write(const void* buf, size_t size) {
         auto actual_count = memcpy_from(
             buf, size);  // copy from (buf, size) to iovec[] in *this,
+        written += actual_count;
         extract_front(actual_count);  // and extract the portion just copied
         if (actual_count < size)      // means full
         {
@@ -277,7 +280,8 @@ public:
         char range[128];
         // seems like llu refer long long unsigned int, uint64_t refers to long
         // unsigned int, so %lu should be good without warning
-        snprintf(range, sizeof(range), "%lu-%lu", start, end);
+        snprintf(range, sizeof(range), "%llu-%llu", (long long unsigned)start,
+                 (long long unsigned)end);   // for compatiblity on macOS
         return setopt(CURLOPT_RANGE, range);
     }
     cURL& set_cafile(const char* cafile) {
@@ -289,6 +293,12 @@ public:
         long v = (bool)max_redir;
         return setopt(CURLOPT_FOLLOWLOCATION, v),
                setopt(CURLOPT_MAXREDIRS, max_redir);
+    }
+    cURL& set_proxy(const char* proxy) {
+        return setopt(CURLOPT_PROXY, proxy);
+    }
+    cURL& set_noproxy(const char* proxy) {
+        return setopt(CURLOPT_NOPROXY, proxy);
     }
     template <typename T>
     cURL& set_header_container(T* stream) {
@@ -331,6 +341,9 @@ public:
         setopt(CURLOPT_HTTPGET, 1L);
         setopt(CURLOPT_URL, url);
         setopt(CURLOPT_HTTPHEADER, headers.list);
+#if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 37
+        setopt(CURLOPT_PROXYHEADER, proxy_headers.list);
+#endif
         set_write_stream(stream);
         ret = (CURLcode)net::curl_perform(m_curl, timeout);
         return get_response_code();
@@ -340,6 +353,9 @@ public:
         setopt(CURLOPT_HTTPGET, 1L);
         setopt(CURLOPT_URL, url);
         setopt(CURLOPT_HTTPHEADER, headers.list);
+#if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 37
+        setopt(CURLOPT_PROXYHEADER, proxy_headers.list);
+#endif
         ret = (CURLcode)net::curl_perform(m_curl, timeout);
         return get_response_code();
     }
@@ -349,6 +365,9 @@ public:
         setopt(CURLOPT_URL, url);
         setopt(CURLOPT_CUSTOMREQUEST, "HEAD");
         setopt(CURLOPT_HTTPHEADER, headers.list);
+#if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 37
+        setopt(CURLOPT_PROXYHEADER, proxy_headers.list);
+#endif
         set_write_stream(stream);
         ret = (CURLcode)net::curl_perform(m_curl, timeout);
         return get_response_code();
@@ -369,6 +388,9 @@ public:
     long POST(const char* url, const char* post_fields, W* wstream,
               uint64_t timeout = -1) {
         setopt(CURLOPT_HTTPHEADER, headers.list);
+#if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 37
+        setopt(CURLOPT_PROXYHEADER, proxy_headers.list);
+#endif
         setopt(CURLOPT_POSTFIELDS, post_fields);
         return POST(url, wstream, timeout);
     }
@@ -379,6 +401,9 @@ public:
         setopt(CURLOPT_URL, url);
         setopt(CURLOPT_POST, 1L);
         setopt(CURLOPT_HTTPHEADER, headers.list);
+#if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 37
+        setopt(CURLOPT_PROXYHEADER, proxy_headers.list);
+#endif
         ret = (CURLcode)net::curl_perform(m_curl, timeout);
         return get_response_code();
     }
@@ -391,6 +416,9 @@ public:
         setopt(CURLOPT_PUT, 1L);
         setopt(CURLOPT_URL, url);
         setopt(CURLOPT_HTTPHEADER, headers.list);
+#if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 37
+        setopt(CURLOPT_PROXYHEADER, proxy_headers.list);
+#endif
         // setopt(CURLOPT_INFILESIZE_LARGE, (curl_off_t)file_info.st_size);
         ret = (CURLcode)net::curl_perform(m_curl, timeout);
         return get_response_code();
@@ -399,6 +427,9 @@ public:
         setopt(CURLOPT_URL, url);
         setopt(CURLOPT_CUSTOMREQUEST, "DELETE");
         setopt(CURLOPT_HTTPHEADER, headers.list);
+#if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 37
+        setopt(CURLOPT_PROXYHEADER, proxy_headers.list);
+#endif
         ret = (CURLcode)net::curl_perform(m_curl, timeout);
         return get_response_code();
     }
@@ -417,6 +448,16 @@ public:
 
     cURL& clear_header() {
         headers.clear();
+        return *this;
+    }
+
+    cURL& append_proxy_header(const std::string& key, const std::string& val) {
+        proxy_headers.append(key + std::string(": ") + val);
+        return *this;
+    }
+
+    cURL& clear_proxy_header() {
+        proxy_headers.clear();
         return *this;
     }
 
@@ -446,7 +487,7 @@ protected:
     CURL* m_curl;
     char m_errmsg[CURL_ERROR_SIZE];
     CURLcode ret = CURLE_OK;
-    slist headers;
+    slist headers, proxy_headers;
     template <typename T>
     cURL& _setopt(CURLoption option, T arg) {
         if (ret != CURLE_OK) return *this;

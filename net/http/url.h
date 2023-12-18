@@ -20,21 +20,20 @@ limitations under the License.
 
 namespace photon {
 namespace net {
+namespace http {
 
 constexpr char http_url_scheme[] = "http://";
 constexpr char https_url_scheme[] = "https://";
 
-inline std::string_view http_or_s(bool cond)
-{
+inline std::string_view http_or_s(bool cond){
     return cond ?
-        std::string_view(net::http_url_scheme) :
-        std::string_view(net::https_url_scheme);
+        std::string_view(http_url_scheme) :
+        std::string_view(https_url_scheme);
 }
 
-inline int what_protocol(estring_view url)
-{
-    if (url.istarts_with(net::http_url_scheme)) return 1;
-    if (url.istarts_with(net::https_url_scheme)) return 2;
+inline int what_protocol(estring_view url) {
+    if (url.istarts_with(http_url_scheme)) return 1;
+    if (url.istarts_with(https_url_scheme)) return 2;
     return 0;
 }
 
@@ -49,9 +48,13 @@ protected:
     rstring_view16 m_fragment;
     uint16_t m_port = 0;
     bool m_secure;
+    char *m_tmp_target = nullptr;
 public:
     URL() = default;
     URL(std::string_view url) { from_string(url); }
+    ~URL() {
+        free((void*)m_tmp_target);
+    }
 
     std::string to_string() {
         return m_url;
@@ -62,25 +65,29 @@ public:
     }
 
     void from_string(std::string_view url);
+    void fix_target();
     std::string_view query() const { return m_url | m_query; }
 
     std::string_view path() const {
-        return m_url | m_path;
+        if (m_tmp_target != nullptr)
+            return (m_tmp_target | m_path);
+        return (m_url | m_path);
     }
 
     std::string_view target() const {
-        return m_target.size() == 0 ?
-            std::string_view("/") : (m_url | m_target);
+        if (m_tmp_target != nullptr)
+            return (m_tmp_target | m_target);
+        return (m_url | m_target);
     }
 
     std::string_view host() const { return m_url | m_host; }
+    std::string_view host_no_port() const { return host(); }
     std::string_view host_port() const { return m_url | m_host_port;}
     uint16_t port() const { return m_port; }
     bool secure() const { return m_secure; }
-    bool empty() const { return m_url; }
+    bool empty() const { return !m_url; }
 };
-class StoredURL : public URL
-{
+class StoredURL : public URL {
 public:
     StoredURL() = default;
     StoredURL(std::string_view url) { from_string(url); }
@@ -91,8 +98,7 @@ public:
         auto u = strndup(url.data(), url.size());
         URL::from_string({u, url.size()});
     }
-    ~StoredURL()
-    {
+    ~StoredURL() {
         free((void*)m_url);
     }
 };
@@ -103,5 +109,9 @@ inline bool need_optional_port(const URL& u) {
     return false;
 }
 
-}
-}
+std::string url_escape(std::string_view url);
+std::string url_unescape(std::string_view url);
+
+} // namespace http
+} // namespace net
+} // namespace photon

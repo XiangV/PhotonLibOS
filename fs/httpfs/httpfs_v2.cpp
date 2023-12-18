@@ -44,19 +44,27 @@ protected:
     uint64_t m_conn_timeout;
     uint64_t m_stat_timeout;
 
-    net::Client *m_client;
+    net::http::Client *m_client;
+    bool m_client_ownership;
 
 public:
-    HttpFs_v2(bool default_https, uint64_t conn_timeout, uint64_t stat_timeout)
-        : m_default_https(default_https),
-          m_conn_timeout(conn_timeout),
+    HttpFs_v2(bool default_https, uint64_t conn_timeout, uint64_t stat_timeout,
+              net::http::Client* client, bool client_ownership)
+        : m_default_https(default_https), m_conn_timeout(conn_timeout),
           m_stat_timeout(stat_timeout) {
-              m_client = net::new_http_client();
-          }
-    ~HttpFs_v2() {
-        delete m_client;
+        if (client == nullptr) {
+            m_client = net::http::new_http_client();
+            m_client_ownership = true;
+        } else {
+            m_client = client;
+            m_client_ownership = client_ownership;
+        }
     }
-    net::Client* get_client() { return m_client; }
+    ~HttpFs_v2() {
+        if (m_client_ownership)
+            delete m_client;
+    }
+    net::http::Client* get_client() { return m_client; }
     IFile* open(const char* pathname, int flags) override;
     IFile* open(const char* pathname, int flags, mode_t) override {
         return open(pathname, flags);
@@ -85,13 +93,17 @@ public:
     UNIMPLEMENTED(int unlink(const char* filename) override);
     UNIMPLEMENTED(int lchown(const char* pathname, uid_t owner, gid_t group)
                       override);
+    UNIMPLEMENTED(int utime(const char *path, const struct utimbuf *file_times) override);
+    UNIMPLEMENTED(int utimes(const char *path, const struct timeval times[2]) override);
+    UNIMPLEMENTED(int lutimes(const char *path, const struct timeval times[2]) override);
+    UNIMPLEMENTED(int mknod(const char *path, mode_t mode, dev_t dev) override);
     UNIMPLEMENTED_POINTER(DIR* opendir(const char*) override);
 };
 
 class HttpFile_v2 : public fs::VirtualReadOnlyFile {
 public:
     std::string m_url;
-    net::CommonHeaders<> m_common_header;
+    net::http::CommonHeaders<> m_common_header;
     HttpFs_v2* m_fs;
     struct stat m_stat;
     uint64_t m_stat_gettime = 0;
@@ -119,7 +131,7 @@ public:
           m_stat_timeout(stat_timeout),
           m_url_param(param) {}
 
-    int update_stat_from_resp(const net::Client::Operation* op) {
+    int update_stat_from_resp(const net::http::Client::Operation* op) {
         auto ret = op->status_code;
         m_stat_gettime = photon::now;
         m_authorized = (ret >= 0 && ret != 401 && ret != 403);
@@ -135,15 +147,15 @@ public:
         m_stat.st_size = len;
         return 0;
     }
-    void send_read_request(net::Client::Operation &op, off_t offset, size_t length, const Timeout &tmo) {
+    void send_read_request(net::http::Client::Operation &op, off_t offset, size_t length, const Timeout &tmo) {
     again:
         estring url;
         url.appends(m_url, "?", m_url_param);
-        op.req.reset(net::Verb::GET, url);
+        op.req.reset(net::http::Verb::GET, url);
         op.set_enable_proxy(m_fs->get_client()->has_proxy());
-        op.req.merge_headers(m_common_header);
-        op.req.insert_range(offset, offset + length - 1);
-        op.req.content_length(0);
+        op.req.headers.merge(m_common_header);
+        op.req.headers.range(offset, offset + length - 1);
+        op.req.headers.content_length(0);
         op.timeout = tmo.timeout();
         m_fs->get_client()->call(&op);
         if (op.status_code < 0) {
@@ -155,7 +167,7 @@ public:
             goto again;
         }
     }
-    using HTTP_OP = net::Client::OperationOnStack<64 * 1024 - 1>;
+    using HTTP_OP = net::http::Client::OperationOnStack<64 * 1024 - 1>;
     int refresh_stat() {
         Timeout tmo(m_conn_timeout);
         HTTP_OP op;
@@ -192,7 +204,7 @@ public:
                              VALUE(m_url), VALUE(offset), VALUE(ret));
         }
         m_authorized = true;
-        ret = op.resp_body->readv(iovec, iovcnt);
+        ret = op.resp.readv(iovec, iovcnt);
         return ret;
     }
 
@@ -218,7 +230,9 @@ public:
 
     //TODO: 这里是否需要考虑m_common_header被打爆的问题？
     void add_header(va_list args) {
-        m_common_header.insert(va_arg(args, const char*), va_arg(args, const char*));
+        auto k = va_arg(args, const char*);
+        auto v = va_arg(args, const char*);
+        m_common_header.insert(k, v);
     }
 
     void add_url_param(va_list args) { m_url_param = va_arg(args, const char*); }
@@ -246,8 +260,8 @@ IFile* HttpFs_v2::open(const char* pathname, int flags) {
 
     if (pathname[0] == '/') ++pathname;
     estring_view fn(pathname), prefix;
-    if (0 == net::what_protocol(fn))
-        prefix = net::http_or_s(!m_default_https);
+    if (0 == net::http::what_protocol(fn))
+        prefix = net::http::http_or_s(!m_default_https);
 
     std::string_view param;
     auto pos = fn.find_first_of('?');
@@ -261,8 +275,10 @@ IFile* HttpFs_v2::open(const char* pathname, int flags) {
 }
 
 IFileSystem* new_httpfs_v2(bool default_https, uint64_t conn_timeout,
-                        uint64_t stat_timeout) {
-    return new HttpFs_v2(default_https, conn_timeout, stat_timeout);
+                           uint64_t stat_timeout, net::http::Client* client,
+                           bool client_ownership) {
+    return new HttpFs_v2(default_https, conn_timeout, stat_timeout,
+                         client, client_ownership);
 }
 
 IFile* new_httpfile_v2(const char* url, HttpFs_v2* httpfs, uint64_t conn_timeout,

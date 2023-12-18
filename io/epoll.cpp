@@ -25,6 +25,8 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/thread/thread.h>
 #include <photon/io/fd-events.h>
+#include "events_map.h"
+#include "reset_handle.h"
 
 namespace photon {
 #ifndef EPOLLRDHUP
@@ -32,8 +34,8 @@ namespace photon {
 #endif
 
 // maps interface event(s) to epoll defined events
-using EVMAP = EventsMap<EPOLLIN | EPOLLRDHUP, EPOLLOUT, EPOLLERR>;
-const static EVMAP evmap(EVENT_READ, EVENT_WRITE, EVENT_ERROR);
+using EVMAP = EventsMap<EVUnderlay<EPOLLIN | EPOLLRDHUP, EPOLLOUT, EPOLLERR>>;
+constexpr static EVMAP evmap;
 constexpr static uint32_t ERRBIT = EVMAP::UNDERLAY_EVENT_ERROR;
 constexpr static uint32_t READBITS =
     EVMAP::UNDERLAY_EVENT_READ | ERRBIT | EPOLLHUP;
@@ -47,7 +49,7 @@ struct InFlightEvent {
     void* error_data;
 };
 
-class EventEngineEPoll : public MasterEventEngine, public CascadingEventEngine {
+class EventEngineEPoll : public MasterEventEngine, public CascadingEventEngine, public ResetHandle {
 public:
     int _evfd = -1;
     int _engine_fd = -1;
@@ -69,6 +71,13 @@ public:
 
         epfd = evfd = -1;
         return 0;
+    }
+    int reset() override {
+        if_close_fd(_engine_fd);    // close original fd
+        if_close_fd(_evfd);
+        _inflight_events.clear();   // reset members
+        _events_remain = 0;
+        return init();              // re-init
     }
     virtual ~EventEngineEPoll() override {
         LOG_INFO("Finish event engine: epoll");
@@ -235,7 +244,7 @@ public:
         int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(
             _engine_fd, timeout);
         if (ret < 0) {
-            return ret;
+            return errno == ETIMEDOUT ? 0 : -1;
         }
         auto ptr = data;
         auto end = data + count;
@@ -246,8 +255,7 @@ public:
                     return (end - ptr) >= 3;
                 });
         if (ptr == data) {
-            errno = ETIMEDOUT;
-            return -1;
+            return 0;
         }
         return ptr - data;
     }

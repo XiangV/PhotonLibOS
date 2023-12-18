@@ -16,79 +16,90 @@ limitations under the License.
 
 #include "photon.h"
 
-#include "thread/thread.h"
 #include "io/fd-events.h"
-#include "io/signalfd.h"
+#include "io/signal.h"
 #include "io/aio-wrapper.h"
+#ifdef ENABLE_FSTACK_DPDK
+#include "io/fstack-dpdk.h"
+#endif
+#include "io/reset_handle.h"
 #include "net/curl.h"
 #include "net/socket.h"
-#include "net/zerocopy.h"
 #include "fs/exportfs.h"
 
 namespace photon {
 
+using namespace fs;
+using namespace net;
+
+static bool reset_handle_registed = false;
 static thread_local uint64_t g_event_engine = 0, g_io_engine = 0;
 
+#define INIT_IO(name, prefix)    if (INIT_IO_##name & io_engine) { if (prefix##_init() < 0) return -1; }
+#define FINI_IO(name, prefix)    if (INIT_IO_##name & g_io_engine) { prefix##_fini(); }
+
+// Try to init master engine with the recommended order
+#if defined(__linux__)
+static const int recommended_order[] = {INIT_EVENT_EPOLL, INIT_EVENT_IOURING, INIT_EVENT_EPOLL_NG, INIT_EVENT_SELECT};
+#else   // macOS, FreeBSD ...
+static const int recommended_order[] = {INIT_EVENT_KQUEUE, INIT_EVENT_SELECT};
+#endif
+
 int init(uint64_t event_engine, uint64_t io_engine) {
-    if (thread_init() < 0) return -1;
+    if (vcpu_init() < 0)
+        return -1;
 
-    if (event_engine & INIT_EVENT_EPOLL) {
-        if (fd_events_epoll_init() < 0) return -1;
-    } else if (event_engine & INIT_EVENT_IOURING) {
-        if (fd_events_iouring_init() < 0) return -1;
-    }
-    if (event_engine & INIT_EVENT_SIGNALFD) {
-        if (sync_signal_init() < 0) return -1;
-    }
-
-    if (io_engine & INIT_IO_LIBAIO) {
-        if (libaio_wrapper_init() < 0) return -1;
-    }
-    if (io_engine & INIT_IO_LIBCURL) {
-        if (net::libcurl_init() < 0) return -1;
-    }
-    if (io_engine & INIT_IO_SOCKET_ZEROCOPY) {
-        if (!net::zerocopy_available()) {
-            LOG_ERRNO_RETURN(0, -1, "zerocopy not available");
+    if (event_engine != INIT_EVENT_NONE) {
+        bool ok = false;
+        for (auto each : recommended_order) {
+            if ((each & event_engine) && fd_events_init(each) == 0) {
+                ok = true;
+                break;
+            }
         }
-        if (net::zerocopy_init() < 0) return -1;
+        if (!ok) {
+            LOG_ERROR_RETURN(0, -1, "All master engines init failed");
+        }
     }
-    if (io_engine & INIT_IO_SOCKET_EDGE_TRIGGER) {
-        if (net::et_poller_init() < 0) return -1;
-    }
-    if (io_engine & INIT_IO_EXPORTFS) {
-        if (fs::exportfs_init() < 0) return -1;
-    }
+
+    if ((INIT_EVENT_SIGNAL & event_engine) && sync_signal_init() < 0)
+        return -1;
+
+#ifdef ENABLE_FSTACK_DPDK
+    INIT_IO(FSTACK_DPDK, fstack_dpdk);
+#endif
+    INIT_IO(EXPORTFS, exportfs)
+    INIT_IO(LIBCURL, libcurl)
+#ifdef __linux__
+    INIT_IO(LIBAIO, libaio_wrapper)
+    INIT_IO(SOCKET_EDGE_TRIGGER, et_poller)
+#endif
     g_event_engine = event_engine;
     g_io_engine = io_engine;
+    if (!reset_handle_registed) {
+        pthread_atfork(nullptr, nullptr, &reset_all_handle);
+        LOG_DEBUG("reset_all_handle registed ", VALUE(getpid()));
+        reset_handle_registed = true;
+    }
     return 0;
 }
 
 int fini() {
-    if (g_event_engine & INIT_EVENT_SIGNALFD) {
+#ifdef __linux__
+    FINI_IO(LIBAIO, libaio_wrapper)
+    FINI_IO(SOCKET_EDGE_TRIGGER, et_poller)
+#endif
+    FINI_IO(LIBCURL, libcurl)
+    FINI_IO(EXPORTFS, exportfs)
+#ifdef ENABLE_FSTACK_DPDK
+    FINI_IO(FSTACK_DPDK, fstack_dpdk)
+#endif
+
+    if (INIT_EVENT_SIGNAL & g_event_engine)
         sync_signal_fini();
-    }
-    if (g_io_engine & INIT_IO_LIBAIO) {
-        libaio_wrapper_fini();
-    }
-    if (g_io_engine & INIT_IO_LIBCURL) {
-        net::libcurl_fini();
-    }
-    if (g_io_engine & INIT_IO_SOCKET_ZEROCOPY) {
-        if (net::zerocopy_available()) {
-            net::zerocopy_fini();
-        }
-    }
-    if (g_io_engine & INIT_IO_SOCKET_EDGE_TRIGGER) {
-        net::et_poller_fini();
-    }
-    if (g_io_engine & INIT_IO_EXPORTFS) {
-        fs::exportfs_fini();
-    }
-    if (g_event_engine & (INIT_EVENT_EPOLL | INIT_EVENT_IOURING)) {
-        fd_events_fini();
-    }
-    thread_fini();
+    fd_events_fini();
+    vcpu_fini();
+    g_event_engine = g_io_engine = 0;
     return 0;
 }
 

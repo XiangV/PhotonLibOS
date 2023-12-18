@@ -30,6 +30,7 @@ namespace photon
         void* arg;
         condition_variable cvar;
         bool joinable, joining;
+        photon::spinlock m_mtx;
     };
 
     class ThreadPoolBase : protected IdentityPool0<TPControl>
@@ -66,6 +67,9 @@ namespace photon
         static void* stub(void* arg);
         static int ctor(ThreadPoolBase*, TPControl**);
         static int dtor(ThreadPoolBase*, TPControl*);
+        static bool wait_for_work(TPControl &ctrl);
+        static bool after_work_done(TPControl &ctrl);
+        static bool do_thread_join(TPControl* pCtrl);
         void init(uint64_t stack_size)
         {
             set_ctor({this, &ctor});

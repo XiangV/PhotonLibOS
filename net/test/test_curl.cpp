@@ -42,9 +42,9 @@ class StringStream {
 };
 
 TEST(cURL, feature) {
-    photon::thread_init();
-    photon::fd_events_init();
-    net::cURL::init();
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_LIBCURL))
+        FAIL();
+    DEFER(photon::fini());
 
     std::unique_ptr<net::cURL> client(new net::cURL());
     std::unique_ptr<StringStream> buffer(new StringStream());
@@ -53,12 +53,8 @@ TEST(cURL, feature) {
         client->GET("http://github.com", buffer.get());
     // }
     LOG_INFO(buffer->str().c_str());
-    buffer.release();
-    client.release();
-
-    net::cURL::fini();
-    photon::fd_events_fini();
-    photon::thread_fini();
+    buffer.reset();
+    client.reset();
 }
 
 int main(int argc, char** argv) {

@@ -661,13 +661,9 @@ int fuser_go(IFileSystem* fs_, int argc, char* argv[])
 
 int fuser_go_exportfs(IFileSystem *fs_, int argc, char *argv[]) {
     if (!fs_) return 0;
-    photon::thread_init();
-    DEFER(photon::thread_fini());
-    photon::fd_events_init();
-    DEFER(photon::fd_events_fini());
-
-    exportfs_init();
-    DEFER(exportfs_fini());
+    if (photon::init(INIT_EVENT_DEFAULT, INIT_IO_DEFAULT | INIT_IO_EXPORTFS))
+        return -1;
+    DEFER(photon::fini());
 
     auto efs = export_as_sync_fs(fs_);
 
@@ -675,12 +671,12 @@ int fuser_go_exportfs(IFileSystem *fs_, int argc, char *argv[]) {
 
     umask(0);
     fs = efs;
-    auto pth = photon::CURRENT;
-    auto th = std::thread([&] {
+    photon::semaphore exit_sem(0);
+    std::thread([&] {
         fuse_main(argc, argv, &xmp_oper, NULL);
-        photon::thread_interrupt(pth);
-    });
-    photon::thread_suspend();
+        exit_sem.signal(1);
+    }).detach();
+    exit_sem.wait(1);
     return 0;
 }
 

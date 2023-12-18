@@ -18,7 +18,9 @@ limitations under the License.
 #include <cstdint>
 #include <cstddef>
 #include <type_traits>
-#include <string>
+#include <utility>
+#include "string_view.h"
+// #include <string>
 
 #define _unused(x) ((void)(x))
 
@@ -264,8 +266,6 @@ public:
     }
 };
 
-#define _unused(x) ((void)(x))
-
 // release resource by RAII
 #define WITH(init_expr) if (init_expr)
 
@@ -283,13 +283,10 @@ public:
 	}
 */
 
-#define EASE_LIKELY(x) __builtin_expect(!!(x), 1)
-#define EASE_UNLIKELY(x) __builtin_expect(!!(x), 0)
+constexpr bool likely(bool expr) { return __builtin_expect(expr, true); }
+constexpr bool unlikely(bool expr) { return __builtin_expect(expr, false); }
 
-namespace Utility {
-
-int version_compare(const std::string& a, const std::string& b, int& result);
-
+int version_compare(std::string_view a, std::string_view b, int& result);
+int kernel_version_compare(std::string_view dst, int& result);
 void print_stacktrace();
 
-}

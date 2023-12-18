@@ -69,7 +69,7 @@ int _gethostbyname(const char* name, Callback<IPAddr> append_op);
  * @param name Host name to resolve
  * @return first resolved address.
  */
- inline IPAddr gethostbyname(const char* name) {
+inline IPAddr gethostbyname(const char* name) {
     IPAddr ret;
     auto cb = [&](IPAddr addr) {
         ret = addr;
@@ -88,7 +88,7 @@ int _gethostbyname(const char* name, Callback<IPAddr> append_op);
  * @param name Host name to resolve
  * @param buf IPAddr buffer pointer
  * @param bufsize size of `buf`, takes `sizeof(IPAddr)` as unit
- * @return sum of resolved address number. result will be filled into `buf`
+ * @return sum of resolved address number. -1 means error. result will be filled into `buf`
  */
 inline int gethostbyname(const char* name, IPAddr* buf, int bufsize = 1) {
     int i = 0;
@@ -107,7 +107,7 @@ inline int gethostbyname(const char* name, IPAddr* buf, int bufsize = 1) {
  *
  * @param name Host name to resolve
  * @param ret `std::vector<IPAddr>` reference to get results
- * @return sum of resolved address number.
+ * @return sum of resolved address number. -1 means error.
  */
 inline int gethostbyname(const char* name, std::vector<IPAddr>& ret) {
     ret.clear();
@@ -142,6 +142,32 @@ inline int gethostbyname_nb(const char* name, std::vector<IPAddr>& ret) {
 }
 
 void Base64Encode(std::string_view in, std::string &out);
+bool Base64Decode(std::string_view in, std::string &out);
+
+/* Check if kernel version satisfies and thus zerocopy feature should be enabled */
+bool zerocopy_available();
+
+/**
+ * @brief A DNS Resolver which can cache domain resolution result.
+ *
+ */
+class Resolver : public Object {
+public:
+    // When failed, return an Undefined IPAddr
+    // Normally dns servers return multiple ips in random order, choosing the first one should suffice.
+    virtual IPAddr resolve(const char* host) = 0;
+    virtual void resolve(const char* host, Delegate<void, IPAddr> func) = 0;
+    virtual void discard_cache(const char* host) = 0;  // discard current cache of host:ip
+};
+
+/**
+ * @brief A non-blocking Resolver based on gethostbyname.
+ *
+ * @param cache_ttl cache's lifetime in microseconds.
+ * @param resolve_timeout timeout in microseconds for domain resolution.
+ * @return Resolver*
+ */
+Resolver* new_default_resolver(uint64_t cache_ttl = 3600UL * 1000000, uint64_t resolve_timeout = -1);
 
 }  // namespace net
 }

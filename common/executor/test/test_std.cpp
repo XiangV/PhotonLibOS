@@ -23,8 +23,6 @@ limitations under the License.
 #include <photon/fs/localfs.h>
 #include <photon/common/utility.h>
 #include <photon/common/executor/executor.h>
-#include <photon/common/executor/stdlock.h>
-#include "photon/common/executor/executor.h"
 
 using namespace photon;
 
@@ -87,7 +85,7 @@ TEST(std_executor, with_exportfs) {
     photon::Executor eth;
 
     auto fs = eth.perform([] {
-        fs::exportfs_init();
+        fs::exportfs_init(10);
         auto local = fs::new_localfs_adaptor();
         return fs::export_as_sync_fs(local);
     });

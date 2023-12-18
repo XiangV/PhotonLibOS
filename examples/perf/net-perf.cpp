@@ -16,13 +16,11 @@ limitations under the License.
 
 #include <fcntl.h>
 #include <chrono>
-#include <vector>
 
 #include <gflags/gflags.h>
 
 #include <photon/photon.h>
-#include <photon/io/signalfd.h>
-#include <photon/common/io-alloc.h>
+#include <photon/io/signal.h>
 #include <photon/thread/thread11.h>
 #include <photon/thread/workerpool.h>
 #include <photon/common/alog.h>
@@ -37,9 +35,10 @@ DEFINE_uint64(port, 9527, "port");
 DEFINE_uint64(buf_size, 512, "buffer size");
 DEFINE_uint64(vcpu_num, 1, "server vcpu num. Increase this value to enable multi-vcpu scheduling");
 
-bool stop_test = false;
-uint64_t qps = 0;
-uint64_t time_cost = 0;
+static int event_engine = 0;
+static bool stop_test = false;
+static uint64_t qps = 0;
+static uint64_t time_cost = 0;
 
 static void handle_signal(int sig) {
     LOG_INFO("Try to gracefully stop test ...");
@@ -67,15 +66,14 @@ static void run_latency_loop() {
 static int ping_pong_client() {
     photon::net::EndPoint ep{photon::net::IPAddr(FLAGS_ip.c_str()), (uint16_t) FLAGS_port};
     auto cli = photon::net::new_tcp_socket_client();
+    // auto cli = photon::net::new_iouring_tcp_client();
     if (cli == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "fail to create client");
     }
     DEFER(delete cli);
 
     auto run_ping_pong_worker = [&]() -> int {
-        AlignedAlloc alloc(512);
-        void* buf = alloc.alloc(FLAGS_buf_size);
-        DEFER(alloc.dealloc(buf));
+        char buf[FLAGS_buf_size];
 
         auto conn = cli->connect(ep);
         if (conn == nullptr) {
@@ -117,6 +115,7 @@ static int ping_pong_client() {
 static int streaming_client() {
     photon::net::EndPoint ep{photon::net::IPAddr(FLAGS_ip.c_str()), (uint16_t) FLAGS_port};
     auto cli = photon::net::new_tcp_socket_client();
+    // auto cli = photon::net::new_iouring_tcp_client();
     if (cli == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "fail to create client");
     }
@@ -129,9 +128,7 @@ static int streaming_client() {
     DEFER(delete conn);
 
     auto send = [&]() -> int {
-        AlignedAlloc alloc(512);
-        void* buf = alloc.alloc(FLAGS_buf_size);
-        DEFER(alloc.dealloc(buf));
+        char buf[FLAGS_buf_size];
         while (!stop_test) {
             ssize_t ret = conn->write(buf, FLAGS_buf_size);
             if (ret != (ssize_t) FLAGS_buf_size) {
@@ -141,9 +138,7 @@ static int streaming_client() {
         return 0;
     };
     auto recv = [&]() -> int {
-        AlignedAlloc alloc(512);
-        void* buf = alloc.alloc(FLAGS_buf_size);
-        DEFER(alloc.dealloc(buf));
+        char buf[FLAGS_buf_size];
         while (!stop_test) {
             ssize_t ret = conn->read(buf, FLAGS_buf_size);
             if (ret != (ssize_t) FLAGS_buf_size) {
@@ -169,7 +164,7 @@ static int echo_server() {
     // Create a work pool if enabling multi-vcpu scheduling
     photon::WorkPool* work_pool = nullptr;
     if (FLAGS_vcpu_num > 1) {
-        work_pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_IOURING, 0);
+        work_pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
     }
     DEFER(delete work_pool);
 
@@ -193,16 +188,11 @@ static int echo_server() {
     };
 
     // Define handler for new connections (SocketStream)
-    auto handler = [&](photon::net::ISocketStream* arg) -> int {
+    auto handler = [&](photon::net::ISocketStream* sock) -> int {
         if (FLAGS_vcpu_num > 1) {
             work_pool->thread_migrate();
         }
-
-        AlignedAlloc alloc(512);
-        void* buf = alloc.alloc(FLAGS_buf_size);
-        DEFER(alloc.dealloc(buf));
-
-        auto sock = (photon::net::ISocketStream*) arg;
+        char buf[FLAGS_buf_size];
         while (true) {
             ssize_t ret1, ret2;
             ret1 = sock->recv(buf, FLAGS_buf_size);
@@ -213,6 +203,7 @@ static int echo_server() {
             if (ret2 != ret1) {
                 LOG_ERRNO_RETURN(0, -1, "write fail", VALUE(ret2));
             }
+            photon::thread_yield();
             qps++;
         }
         return 0;
@@ -226,7 +217,7 @@ static int echo_server() {
 
     server->set_handler(handler);
     server->bind(FLAGS_port, photon::net::IPAddr());
-    server->listen(1024);
+    server->listen();
     server->start_loop(true);
 
     photon::thread_join((photon::join_handle*) qps_th);
@@ -238,12 +229,10 @@ int main(int argc, char** arg) {
     gflags::ParseCommandLineFlags(&argc, &arg, true);
     set_log_output_level(ALOG_INFO);
 
-    // Note that Photon downloads and compiles liburing by default. Even though compiling it doesn't require
-    // the latest kernel, running an io_uring program does need the kernel version be greater than 5.8.
-    //
-    // If you have trouble upgrading the kernel, please switch the event_engine argument
-    // from `photon::INIT_EVENT_IOURING` to `photon::INIT_EVENT_EPOLL`.
-    int ret = photon::init(photon::INIT_EVENT_IOURING | photon::INIT_EVENT_SIGNALFD, 0);
+    // Note Photon's default event engine will first try io_uring, then choose epoll if io_uring failed.
+    // Running an io_uring program would need the kernel version to be greater than 5.8.
+    // We encourage you to upgrade to the latest kernel so that you could enjoy the extraordinary performance.
+    int ret = photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
     if (ret < 0) {
         LOG_ERROR_RETURN(0, -1, "failed to init photon environment");
     }

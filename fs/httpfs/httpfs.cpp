@@ -79,6 +79,10 @@ public:
     UNIMPLEMENTED(int unlink(const char* filename) override);
     UNIMPLEMENTED(int lchown(const char* pathname, uid_t owner, gid_t group)
                       override);
+    UNIMPLEMENTED(int utime(const char *path, const struct utimbuf *file_times) override);
+    UNIMPLEMENTED(int utimes(const char *path, const struct timeval times[2]) override);
+    UNIMPLEMENTED(int lutimes(const char *path, const struct timeval times[2]) override);
+    UNIMPLEMENTED(int mknod(const char *path, mode_t mode, dev_t dev) override);
     UNIMPLEMENTED_POINTER(DIR* opendir(const char*) override);
 
     net::cURL* acquire_curl() { return new net::cURL(); }
@@ -225,8 +229,7 @@ public:
                              VALUE(url), VALUE(offset), VALUE(ret));
         }
         authorized = true;
-        headers.try_get("content-length", ret);
-        return ret;
+        return writer.written;
     }
 
     int fstat(struct stat* buf) override {
@@ -248,7 +251,9 @@ public:
     }
 
     void add_header(va_list args) {
-        common_header[va_arg(args, const char*)] = va_arg(args, const char*);
+        auto k = va_arg(args, const char*);
+        auto v = va_arg(args, const char*);
+        common_header[k] = v;
     }
 
     void add_url_param(va_list args) { url_param = va_arg(args, const char*); }
